@@ -110,6 +110,8 @@
       <p class="role-desc">Enter what your customer should look for, then start sharing. You'll get a 4-digit code to send them.</p>
       <label for="vehicle-input">Vehicle description</label>
       <input type="text" id="vehicle-input" placeholder="e.g. Black Suburban, curb by Gate 3" maxlength="60" />
+      <label for="phone-input">Your phone number (optional — lets your customer call or text you)</label>
+      <input type="tel" id="phone-input" placeholder="e.g. 7135551234" maxlength="20" />
       <button class="big-btn btn-amber" style="margin-top:20px;" onclick="startSharing()">Start Sharing My Location</button>
       <button class="back-link" onclick="showScreen('home')">Back</button>
     </div>
@@ -128,6 +130,7 @@
         <div class="map-placeholder">Waiting for your customer to share their location…</div>
       </div>
       <div class="updated-line" id="driver-customer-updated"></div>
+      <button class="big-btn btn-outline" onclick="manualRefreshDriverSide()">🔄 Refresh</button>
       <button class="big-btn btn-danger" onclick="stopSharing()">Stop Sharing</button>
       <p class="hint">Keep this page open while you're waiting for your customer.</p>
     </div>
@@ -152,8 +155,13 @@
         <div id="customer-map" style="width:100%;height:100%;"></div>
       </div>
       <div class="updated-line" id="customer-updated">Waiting for location…</div>
+      <button class="big-btn btn-outline" onclick="manualRefreshCustomerSide()">🔄 Refresh</button>
       <div class="status-line waiting" id="customer-share-status">
         <span class="dot"></span><span>Requesting your location…</span>
+      </div>
+      <div id="contact-driver-buttons" class="hidden" style="margin-top:14px;">
+        <a id="call-driver-btn" class="big-btn btn-outline" style="text-decoration:none;display:block;text-align:center;">📞 Call Driver</a>
+        <a id="text-driver-btn" class="big-btn btn-outline" style="text-decoration:none;display:block;text-align:center;">💬 Text Driver</a>
       </div>
       <button class="back-link" onclick="stopWatching(); showScreen('home')">Start Over</button>
     </div>
@@ -235,6 +243,16 @@ async function testConfig(){
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  const savedVehicle = localStorage.getItem('savedVehicleDescription');
+  if(savedVehicle){
+    const vInput = document.getElementById('vehicle-input');
+    if(vInput) vInput.value = savedVehicle;
+  }
+  const savedPhone = localStorage.getItem('savedDriverPhone');
+  if(savedPhone){
+    const pInput = document.getElementById('phone-input');
+    if(pInput) pInput.value = savedPhone;
+  }
   if(FIREBASE_CONFIG.apiKey === 'REPLACE_ME'){
     showScreen('setup');
     return;
@@ -246,6 +264,72 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function genCode(){
   return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+/* ---------------- SYNC TIME / PING / REFRESH HELPERS ---------------- */
+
+let lastDriverSyncTs = null;   // last known "updated" timestamp for the customer's data (seen by driver)
+let lastCustomerSyncTs = null; // last known "updated" timestamp for the driver's data (seen by customer)
+let lastDriverPingTs = 0;
+let lastCustomerPingTs = 0;
+const PING_MIN_INTERVAL_MS = 30000; // don't ping more than once every 30s
+
+function formatCentralTime(ts){
+  return new Date(ts).toLocaleTimeString('en-US', {
+    timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
+  }) + ' CT';
+}
+
+function syncLabel(ts){
+  if(!ts) return 'Waiting for location…';
+  const secsAgo = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  const rel = secsAgo < 8 ? 'Updated just now' : `Updated ${secsAgo}s ago`;
+  return `${rel} — last sync ${formatCentralTime(ts)}`;
+}
+
+function refreshSyncLabels(){
+  const dEl = document.getElementById('driver-customer-updated');
+  if(dEl && lastDriverSyncTs) dEl.textContent = syncLabel(lastDriverSyncTs);
+  const cEl = document.getElementById('customer-updated');
+  if(cEl && lastCustomerSyncTs) cEl.textContent = syncLabel(lastCustomerSyncTs);
+}
+setInterval(refreshSyncLabels, 5000);
+
+function playUpdatePing(){
+  try{ if(navigator.vibrate) navigator.vibrate(70); }catch(e){}
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.06, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + 0.18);
+  }catch(e){}
+}
+
+async function manualRefreshDriverSide(){
+  if(!currentCode || !db) return;
+  try{
+    const snap = await db.ref('trips/' + currentCode + '/customer').once('value');
+    const data = snap.val();
+    if(data){
+      driverOtherPos = { lat: data.lat, lng: data.lng };
+      renderTwoPersonMap('driver-map', driverSelfPos, driverOtherPos, 'Customer');
+      lastDriverSyncTs = data.updated;
+      refreshSyncLabels();
+    }
+  }catch(e){ /* silent — keep last known view */ }
+}
+
+async function manualRefreshCustomerSide(){
+  if(!currentCode || !db) return;
+  try{
+    const snap = await db.ref('trips/' + currentCode + '/driver').once('value');
+    const data = snap.val();
+    if(data) updateDriverView(data);
+  }catch(e){ /* silent — keep last known view */ }
 }
 
 const mapInstances = {}; // { containerId: { map, selfMarker, otherMarker } }
@@ -311,8 +395,12 @@ let driverOtherPos = null;
 
 async function startSharing(){
   const vehicle = document.getElementById('vehicle-input').value.trim();
+  const phone = document.getElementById('phone-input').value.trim();
   if(!vehicle){ alert('Please enter a short vehicle description first.'); return; }
   if(!navigator.geolocation){ alert('This browser cannot access location. Try a different browser.'); return; }
+
+  localStorage.setItem('savedVehicleDescription', vehicle);
+  if(phone) localStorage.setItem('savedDriverPhone', phone);
 
   currentCode = genCode();
   document.getElementById('active-code').textContent = currentCode;
@@ -325,7 +413,11 @@ async function startSharing(){
     const now = Date.now();
     if(lastDriverUpdateTs && now - lastDriverUpdateTs < 5000) return;
     lastDriverUpdateTs = now;
-    const payload = { vehicle, lat: pos.coords.latitude, lng: pos.coords.longitude, updated: now };
+    const payload = {
+      vehicle, phone: phone || null,
+      lat: pos.coords.latitude, lng: pos.coords.longitude,
+      updated: now, expiresAt: now + (3 * 60 * 60 * 1000) // 3 hour expiry
+    };
     try{
       await db.ref('trips/' + currentCode + '/driver').set(payload);
       document.getElementById('driver-status-text').textContent = 'Sharing your live location';
@@ -342,15 +434,20 @@ async function startSharing(){
     if(!data) return;
     driverOtherPos = { lat: data.lat, lng: data.lng };
     renderTwoPersonMap('driver-map', driverSelfPos, driverOtherPos, 'Customer');
-    const secsAgo = Math.max(0, Math.round((Date.now() - data.updated) / 1000));
-    document.getElementById('driver-customer-updated').textContent =
-      secsAgo < 8 ? 'Updated just now' : 'Updated ' + secsAgo + ' seconds ago';
+    lastDriverSyncTs = data.updated;
+    document.getElementById('driver-customer-updated').textContent = syncLabel(lastDriverSyncTs);
+    const now = Date.now();
+    if(now - lastDriverPingTs > PING_MIN_INTERVAL_MS){
+      lastDriverPingTs = now;
+      playUpdatePing();
+    }
   });
 }
 
 function stopSharing(){
   if(driverWatchId !== null){ navigator.geolocation.clearWatch(driverWatchId); driverWatchId = null; }
   if(driverCustomerListenerRef){ driverCustomerListenerRef.off(); driverCustomerListenerRef = null; }
+  if(currentCode && db){ db.ref('trips/' + currentCode).remove().catch(() => {}); }
   if(mapInstances['driver-map']){
     mapInstances['driver-map'].map.remove();
     delete mapInstances['driver-map'];
@@ -358,6 +455,7 @@ function stopSharing(){
   }
   driverSelfPos = null;
   driverOtherPos = null;
+  lastDriverSyncTs = null;
   currentCode = null;
   showScreen('home');
 }
@@ -382,7 +480,8 @@ async function findDriver(){
   try{
     const snap = await db.ref('trips/' + code + '/driver').once('value');
     const data = snap.val();
-    if(!data){
+    const isExpired = data && data.expiresAt && Date.now() > data.expiresAt;
+    if(!data || isExpired){
       stopWatching();
       errBox.textContent = "Code not found. Ask your driver to double-check it and make sure they've started sharing.";
       errBox.classList.remove('hidden');
@@ -406,9 +505,22 @@ function updateDriverView(data){
   document.getElementById('customer-vehicle-value').textContent = data.vehicle || 'Your driver';
   customerOtherPos = { lat: data.lat, lng: data.lng };
   renderTwoPersonMap('customer-map', customerSelfPos, customerOtherPos, data.vehicle || 'Driver');
-  const secsAgo = Math.max(0, Math.round((Date.now() - data.updated) / 1000));
-  document.getElementById('customer-updated').textContent =
-    secsAgo < 8 ? 'Updated just now' : 'Updated ' + secsAgo + ' seconds ago';
+  lastCustomerSyncTs = data.updated;
+  document.getElementById('customer-updated').textContent = syncLabel(lastCustomerSyncTs);
+  const now = Date.now();
+  if(now - lastCustomerPingTs > PING_MIN_INTERVAL_MS){
+    lastCustomerPingTs = now;
+    playUpdatePing();
+  }
+
+  const contactWrap = document.getElementById('contact-driver-buttons');
+  if(data.phone){
+    document.getElementById('call-driver-btn').href = 'tel:' + data.phone;
+    document.getElementById('text-driver-btn').href = 'sms:' + data.phone;
+    contactWrap.classList.remove('hidden');
+  } else {
+    contactWrap.classList.add('hidden');
+  }
 }
 
 function startSharingCustomerLocation(){
@@ -445,11 +557,23 @@ function stopWatching(){
   }
   customerSelfPos = null;
   customerOtherPos = null;
+  lastCustomerSyncTs = null;
   currentCode = null;
 }
 
+let autoSubmitTimer = null;
 document.getElementById('code-input').addEventListener('input', (e) => {
   e.target.value = e.target.value.replace(/[^0-9]/g, '');
+  if(autoSubmitTimer){ clearTimeout(autoSubmitTimer); autoSubmitTimer = null; }
+  if(e.target.value.length === 4){
+    autoSubmitTimer = setTimeout(() => {
+      // Only auto-submit if the field still holds exactly 4 digits
+      // (guards against a quick backspace/correction right after typing the 4th digit)
+      if(document.getElementById('code-input').value.length === 4){
+        findDriver();
+      }
+    }, 500);
+  }
 });
 </script>
 </body>
