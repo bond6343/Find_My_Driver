@@ -112,10 +112,18 @@
 
     <!-- DRIVER SETUP -->
     <div id="screen-driver-setup" class="hidden">
+      <div id="resume-trip-banner" class="hidden vehicle-banner" style="text-align:left;">
+        <div class="label">Unfinished trip found</div>
+        <div class="value" id="resume-trip-code" style="font-size:20px;"></div>
+        <p class="hint" style="text-align:left;margin-top:8px;">Looks like your last trip didn't close out properly (page refresh or app switch). You can pick up right where you left off using the same code, or start fresh.</p>
+        <button class="big-btn btn-amber" style="margin-top:10px;" onclick="resumeSavedTrip()">Resume This Trip</button>
+        <button class="back-link" onclick="dismissResumeTrip()">Start a New Trip Instead</button>
+      </div>
       <p class="role-desc">Enter what your customer should look for, then start sharing. You'll get a 4-digit code to send them.</p>
       <label for="vehicle-input">Vehicle description</label>
       <input type="text" id="vehicle-input" placeholder="e.g. Black Suburban, curb by Gate 3" maxlength="60" />
       <button class="big-btn btn-amber" style="margin-top:20px;" onclick="startSharing()">Start Sharing My Location</button>
+      <p class="hint">🔋 Live location sharing uses extra battery — if you'll be waiting a while, keep your charger handy.</p>
       <button class="back-link" onclick="showScreen('home')">Back</button>
     </div>
 
@@ -129,6 +137,9 @@
         <div class="value" id="driver-vehicle-echo">—</div>
       </div>
       <div class="section-label">Your customer's location</div>
+      <div class="status-line waiting" id="driver-customer-status">
+        <span class="dot"></span><span>Waiting for your customer to open the link and share their location…</span>
+      </div>
       <div id="driver-map" class="map-frame">
         <div class="map-placeholder">Waiting for your customer to share their location…</div>
       </div>
@@ -150,6 +161,9 @@
 
     <!-- CUSTOMER ACTIVE -->
     <div id="screen-customer-active" class="hidden">
+      <div id="trip-ended-banner" class="hidden error-box" style="background:rgba(242,165,65,0.12);border-color:var(--amber);color:var(--amber);">
+        Your driver has ended location sharing for this trip.
+      </div>
       <div class="vehicle-banner">
         <div class="label">Look for</div>
         <div class="value" id="customer-vehicle-value">—</div>
@@ -453,14 +467,16 @@ function recenterMap(containerId){
 let driverSelfPos = null;
 let driverOtherPos = null;
 
-async function startSharing(){
+async function startSharing(resumeCode){
   const vehicle = document.getElementById('vehicle-input').value.trim();
   if(!vehicle){ alert('Please enter a short vehicle description first.'); return; }
   if(!navigator.geolocation){ alert('This browser cannot access location. Try a different browser.'); return; }
 
   localStorage.setItem('savedVehicleDescription', vehicle);
 
-  currentCode = genCode();
+  currentCode = resumeCode || genCode();
+  localStorage.setItem('activeTrip', JSON.stringify({ code: currentCode, vehicle, startedAt: Date.now() }));
+
   document.getElementById('active-code').textContent = currentCode;
   document.getElementById('driver-vehicle-echo').textContent = vehicle;
   showScreen('driver-active');
@@ -474,7 +490,8 @@ async function startSharing(){
     const payload = {
       vehicle,
       lat: pos.coords.latitude, lng: pos.coords.longitude,
-      updated: now, expiresAt: now + (3 * 60 * 60 * 1000) // 3 hour expiry
+      updated: now, expiresAt: now + (3 * 60 * 60 * 1000), // 3 hour expiry
+      ended: false
     };
     try{
       await db.ref('trips/' + currentCode + '/driver').set(payload);
@@ -494,6 +511,9 @@ async function startSharing(){
     renderTwoPersonMap('driver-map', driverSelfPos, driverOtherPos, 'Customer');
     lastDriverSyncTs = data.updated;
     document.getElementById('driver-customer-updated').textContent = syncLabel(lastDriverSyncTs);
+    const statusEl = document.getElementById('driver-customer-status');
+    statusEl.classList.remove('waiting');
+    statusEl.querySelector('span:last-child').textContent = "Customer is sharing their location";
     const now = Date.now();
     if(now - lastDriverPingTs > PING_MIN_INTERVAL_MS){
       lastDriverPingTs = now;
@@ -506,12 +526,25 @@ function stopSharing(){
   document.body.style.overflow = '';
   if(driverWatchId !== null){ navigator.geolocation.clearWatch(driverWatchId); driverWatchId = null; }
   if(driverCustomerListenerRef){ driverCustomerListenerRef.off(); driverCustomerListenerRef = null; }
-  if(currentCode && db){ db.ref('trips/' + currentCode).remove().catch(() => {}); }
+  localStorage.removeItem('activeTrip');
+  if(currentCode && db){
+    // Tell the customer's screen the trip has ended before removing the data,
+    // so their listener has a chance to show a clear message instead of
+    // just silently freezing on the last known position.
+    db.ref('trips/' + currentCode + '/driver').update({ ended: true, updated: Date.now() })
+      .then(() => {
+        setTimeout(() => { db.ref('trips/' + currentCode).remove().catch(() => {}); }, 3000);
+      })
+      .catch(() => { db.ref('trips/' + currentCode).remove().catch(() => {}); });
+  }
   if(mapInstances['driver-map']){
     mapInstances['driver-map'].map.remove();
     delete mapInstances['driver-map'];
     document.getElementById('driver-map').innerHTML = '<div class="map-placeholder">Waiting for your customer to share their location…</div>';
   }
+  const statusEl = document.getElementById('driver-customer-status');
+  statusEl.classList.add('waiting');
+  statusEl.querySelector('span:last-child').textContent = "Waiting for your customer to open the link and share their location…";
   driverSelfPos = null;
   driverOtherPos = null;
   lastDriverSyncTs = null;
@@ -540,16 +573,26 @@ async function findDriver(){
     const snap = await db.ref('trips/' + code + '/driver').once('value');
     const data = snap.val();
     const isExpired = data && data.expiresAt && Date.now() > data.expiresAt;
-    if(!data || isExpired){
+    if(!data || isExpired || data.ended){
       stopWatching();
       errBox.textContent = "Code not found. Ask your driver to double-check it and make sure they've started sharing.";
       errBox.classList.remove('hidden');
       return;
     }
+    document.getElementById('trip-ended-banner').classList.add('hidden');
     showScreen('customer-active');
     updateDriverView(data);
     customerDriverListenerRef = db.ref('trips/' + code + '/driver');
-    customerDriverListenerRef.on('value', (s) => { const d = s.val(); if(d) updateDriverView(d); });
+    customerDriverListenerRef.on('value', (s) => {
+      const d = s.val();
+      if(!d) return;
+      if(d.ended){
+        document.getElementById('trip-ended-banner').classList.remove('hidden');
+        if(customerWatchId !== null){ navigator.geolocation.clearWatch(customerWatchId); customerWatchId = null; }
+        return;
+      }
+      updateDriverView(d);
+    });
   }catch(e){
     stopWatching();
     errBox.textContent = 'Something went wrong looking up that code: ' + e.message;
