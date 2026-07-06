@@ -105,8 +105,8 @@
 
     <!-- HOME -->
     <div id="screen-home" class="hidden">
-      <p class="role-desc">Are you the driver, or waiting for your driver?</p>
-      <button class="big-btn btn-amber" onclick="showScreen('driver-setup')">I'm the Driver</button>
+      <p class="role-desc" id="home-role-desc">Waiting for your driver?</p>
+      <button class="big-btn btn-amber hidden" id="driver-mode-btn" onclick="showScreen('driver-setup')">I'm the Driver</button>
       <button class="big-btn btn-outline" onclick="showScreen('customer-setup')">I'm Waiting for My Driver</button>
     </div>
 
@@ -185,6 +185,11 @@
 
 <script>
 // ---- ONE-TIME SETUP: replace this whole object with your real firebaseConfig ----
+// ---- Private access key: only YOU should know this value.
+// Bookmark your own link as: yoursite.com/?key=THIS_VALUE
+// The plain link (no ?key=...) you give customers will never show the driver option.
+const DRIVER_ACCESS_KEY = "bruce5394";
+
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCdCeO49ktB7zPqzUaRHtxMky4_nGumSAc",
   authDomain: "location-ce738.firebaseapp.com",
@@ -267,6 +272,13 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   firebase.initializeApp(FIREBASE_CONFIG);
   db = firebase.database();
+
+  const urlKey = new URLSearchParams(window.location.search).get('key');
+  if(urlKey && DRIVER_ACCESS_KEY !== 'REPLACE_ME_WITH_YOUR_OWN_SECRET' && urlKey === DRIVER_ACCESS_KEY){
+    document.getElementById('driver-mode-btn').classList.remove('hidden');
+    document.getElementById('home-role-desc').textContent = 'Are you the driver, or waiting for your driver?';
+  }
+
   showScreen('home');
 });
 
