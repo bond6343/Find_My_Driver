@@ -467,6 +467,34 @@ function recenterMap(containerId){
 let driverSelfPos = null;
 let driverOtherPos = null;
 
+let wakeLock = null;
+let wakeLockNeeded = false; // true while either screen should be kept awake
+
+async function requestWakeLock(){
+  wakeLockNeeded = true;
+  try{
+    if(navigator.wakeLock){
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  }catch(e){ /* not supported or denied — app still works, just may dim normally */ }
+}
+
+async function releaseWakeLock(){
+  wakeLockNeeded = false;
+  if(wakeLock){
+    try{ await wakeLock.release(); }catch(e){}
+    wakeLock = null;
+  }
+}
+
+document.addEventListener('visibilitychange', async () => {
+  // Wake locks are auto-released when a tab is backgrounded; re-acquire
+  // once it's foregrounded again if we're still in an active session.
+  if(document.visibilityState === 'visible' && wakeLockNeeded && !wakeLock){
+    try{ wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
+  }
+});
+
 async function startSharing(resumeCode){
   const vehicle = document.getElementById('vehicle-input').value.trim();
   if(!vehicle){ alert('Please enter a short vehicle description first.'); return; }
@@ -480,6 +508,7 @@ async function startSharing(resumeCode){
   document.getElementById('active-code').textContent = currentCode;
   document.getElementById('driver-vehicle-echo').textContent = vehicle;
   showScreen('driver-active');
+  requestWakeLock();
 
   driverWatchId = navigator.geolocation.watchPosition(async (pos) => {
     driverSelfPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
@@ -523,6 +552,7 @@ async function startSharing(resumeCode){
 }
 
 function stopSharing(){
+  releaseWakeLock();
   document.body.style.overflow = '';
   if(driverWatchId !== null){ navigator.geolocation.clearWatch(driverWatchId); driverWatchId = null; }
   if(driverCustomerListenerRef){ driverCustomerListenerRef.off(); driverCustomerListenerRef = null; }
@@ -581,6 +611,7 @@ async function findDriver(){
     }
     document.getElementById('trip-ended-banner').classList.add('hidden');
     showScreen('customer-active');
+    requestWakeLock();
     updateDriverView(data);
     customerDriverListenerRef = db.ref('trips/' + code + '/driver');
     customerDriverListenerRef.on('value', (s) => {
@@ -642,6 +673,7 @@ function startSharingCustomerLocation(){
 }
 
 function stopWatching(){
+  releaseWakeLock();
   document.body.style.overflow = '';
   if(customerDriverListenerRef){ customerDriverListenerRef.off(); customerDriverListenerRef = null; }
   if(customerWatchId !== null){ navigator.geolocation.clearWatch(customerWatchId); customerWatchId = null; }
