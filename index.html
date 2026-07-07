@@ -129,31 +129,33 @@
 
     <!-- DRIVER ACTIVE -->
     <div id="screen-driver-active" class="hidden">
-      <p class="role-desc" style="text-align:center;">Send this code to your customer:</p>
+      <p class="role-desc" style="text-align:center;">Send this code to your riders — everyone who joins with it will see each other:</p>
       <div class="code-display code-font" id="active-code">0000</div>
       <div class="status-line"><span class="dot"></span><span id="driver-status-text">Sharing your live location</span></div>
       <div class="vehicle-banner">
         <div class="label">They're looking for</div>
         <div class="value" id="driver-vehicle-echo">—</div>
       </div>
-      <div class="section-label">Your customer's location</div>
+      <div class="section-label">Your riders</div>
       <div class="status-line waiting" id="driver-customer-status">
-        <span class="dot"></span><span>Waiting for your customer to open the link and share their location…</span>
+        <span class="dot"></span><span>Waiting for riders to join and share their location…</span>
       </div>
       <div id="driver-map" class="map-frame">
-        <div class="map-placeholder">Waiting for your customer to share their location…</div>
+        <div class="map-placeholder">Waiting for riders to share their location…</div>
       </div>
       <div class="updated-line" id="driver-customer-updated"></div>
       <button class="big-btn btn-outline" onclick="manualRefreshDriverSide()">🔄 Refresh</button>
       <button class="big-btn btn-danger" onclick="stopSharing()">Stop Sharing</button>
-      <p class="hint">Keep this page open while you're waiting for your customer.</p>
+      <p class="hint">Keep this page open while you're waiting for your riders.</p>
     </div>
 
     <!-- CUSTOMER SETUP -->
     <div id="screen-customer-setup" class="hidden">
-      <p class="role-desc">Enter the 4-digit code your driver sent you.</p>
+      <p class="role-desc">Enter the 4-digit code your driver sent you. If others in your group also join with this code, you'll all see each other.</p>
       <label for="code-input">Driver's code</label>
       <input type="tel" id="code-input" class="code-input code-font" maxlength="4" inputmode="numeric" placeholder="1234" />
+      <label for="rider-name-input">Your name (optional — helps the driver and your group tell you apart)</label>
+      <input type="text" id="rider-name-input" placeholder="e.g. Sarah" maxlength="20" />
       <button class="big-btn btn-amber" style="margin-top:20px;" onclick="findDriver()">Find My Driver</button>
       <button class="back-link" onclick="showScreen('home')">Back</button>
       <div id="customer-error" class="error-box hidden"></div>
@@ -168,6 +170,7 @@
         <div class="label">Look for</div>
         <div class="value" id="customer-vehicle-value">—</div>
       </div>
+      <div class="updated-line" id="rider-group-count"></div>
       <div class="map-frame">
         <div id="customer-map" style="width:100%;height:100%;"></div>
       </div>
@@ -188,7 +191,7 @@
 // ---- Private access key: only YOU should know this value.
 // Bookmark your own link as: yoursite.com/?key=THIS_VALUE
 // The plain link (no ?key=...) you give customers will never show the driver option.
-const DRIVER_ACCESS_KEY = "bruce5394";
+const DRIVER_ACCESS_KEY = "bond5394";
 
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCdCeO49ktB7zPqzUaRHtxMky4_nGumSAc",
@@ -333,12 +336,13 @@ function playUpdatePing(){
 async function manualRefreshDriverSide(){
   if(!currentCode || !db) return;
   try{
-    const snap = await db.ref('trips/' + currentCode + '/customer').once('value');
-    const data = snap.val();
-    if(data){
-      driverOtherPos = { lat: data.lat, lng: data.lng };
-      renderTwoPersonMap('driver-map', driverSelfPos, driverOtherPos, 'Customer');
-      lastDriverSyncTs = data.updated;
+    const snap = await db.ref('trips/' + currentCode + '/riders').once('value');
+    driverRiders = snap.val() || {};
+    renderDriverMap();
+    const riderIds = Object.keys(driverRiders);
+    const mostRecent = Math.max(0, ...riderIds.map(id => driverRiders[id].updated || 0));
+    if(mostRecent){
+      lastDriverSyncTs = mostRecent;
       refreshSyncLabels();
     }
   }catch(e){ /* silent — keep last known view */ }
@@ -353,7 +357,7 @@ async function manualRefreshCustomerSide(){
   }catch(e){ /* silent — keep last known view */ }
 }
 
-const mapInstances = {}; // { containerId: { map, selfMarker, otherMarker } }
+const mapInstances = {}; // { containerId: { map, markers: {id: L.Marker}, hasAutoFitted } }
 
 function youIcon(){
   return L.divIcon({
@@ -362,51 +366,62 @@ function youIcon(){
     iconSize: [18,18], iconAnchor: [9,9]
   });
 }
-function otherIcon(){
+function driverIcon(){
   return L.divIcon({
     className: '',
     html: '<div style="width:22px;height:22px;border-radius:50%;background:#F2A541;border:3px solid white;box-shadow:0 0 6px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;font-size:12px;">🚗</div>',
     iconSize: [22,22], iconAnchor: [11,11]
   });
 }
+function riderIcon(label){
+  const initial = (label || '?').trim().charAt(0).toUpperCase() || '?';
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:22px;height:22px;border-radius:50%;background:#5B8DEF;border:3px solid white;box-shadow:0 0 6px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:white;">${initial}</div>`,
+    iconSize: [22,22], iconAnchor: [11,11]
+  });
+}
 
-function renderTwoPersonMap(containerId, selfPos, otherPos, otherLabel){
+// markerList: array of { id, lat, lng, label, kind } where kind is 'self' | 'driver' | 'rider'
+function renderGroupMap(containerId, markerList){
   const container = document.getElementById(containerId);
   if(!container) return;
   if(!mapInstances[containerId]){
     container.innerHTML = '';
     const map = L.map(containerId, { zoomControl: false, attributionControl: false });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-    mapInstances[containerId] = { map, selfMarker: null, otherMarker: null, hasAutoFitted: false };
+    mapInstances[containerId] = { map, markers: {}, hasAutoFitted: false };
     addRecenterControl(map, containerId);
   }
   const inst = mapInstances[containerId];
+  const seenIds = new Set();
   const points = [];
 
-  if(otherPos){
-    if(inst.otherMarker){
-      inst.otherMarker.setLatLng([otherPos.lat, otherPos.lng]);
+  markerList.forEach(m => {
+    seenIds.add(m.id);
+    points.push([m.lat, m.lng]);
+    const icon = m.kind === 'self' ? youIcon() : m.kind === 'driver' ? driverIcon() : riderIcon(m.label);
+    if(inst.markers[m.id]){
+      inst.markers[m.id].setLatLng([m.lat, m.lng]);
+      inst.markers[m.id].setIcon(icon);
+      inst.markers[m.id].setTooltipContent(m.label || 'Rider');
     } else {
-      inst.otherMarker = L.marker([otherPos.lat, otherPos.lng], { icon: otherIcon() })
-        .addTo(inst.map).bindTooltip(otherLabel || 'Them', { permanent:false });
+      inst.markers[m.id] = L.marker([m.lat, m.lng], { icon })
+        .addTo(inst.map).bindTooltip(m.label || 'Rider', { permanent:false });
     }
-    points.push([otherPos.lat, otherPos.lng]);
-  }
-  if(selfPos){
-    if(inst.selfMarker){
-      inst.selfMarker.setLatLng([selfPos.lat, selfPos.lng]);
-    } else {
-      inst.selfMarker = L.marker([selfPos.lat, selfPos.lng], { icon: youIcon() })
-        .addTo(inst.map).bindTooltip('You', { permanent:false });
+  });
+
+  // Remove markers for anyone no longer present (e.g. a rider stopped sharing)
+  Object.keys(inst.markers).forEach(id => {
+    if(!seenIds.has(id)){
+      inst.map.removeLayer(inst.markers[id]);
+      delete inst.markers[id];
     }
-    points.push([selfPos.lat, selfPos.lng]);
-  }
+  });
 
   // Only auto-fit/re-center the very first time we have points to show.
-  // After that, leave the user's manual zoom/pan alone — they can tap
-  // the recenter button if they want the view reset.
   if(!inst.hasAutoFitted && points.length > 0){
-    if(points.length === 2){
+    if(points.length > 1){
       inst.map.fitBounds(points, { padding: [30,30], maxZoom: 16 });
     } else {
       inst.map.setView(points[0], 15);
@@ -465,10 +480,8 @@ function toggleMapExpand(containerId){
 function recenterMap(containerId){
   const inst = mapInstances[containerId];
   if(!inst) return;
-  const points = [];
-  if(inst.otherMarker) points.push(inst.otherMarker.getLatLng());
-  if(inst.selfMarker) points.push(inst.selfMarker.getLatLng());
-  if(points.length === 2){
+  const points = Object.values(inst.markers).map(m => m.getLatLng());
+  if(points.length > 1){
     inst.map.fitBounds(points, { padding: [30,30], maxZoom: 16 });
   } else if(points.length === 1){
     inst.map.setView(points[0], 15);
@@ -478,7 +491,7 @@ function recenterMap(containerId){
 /* ---------------- DRIVER SIDE ---------------- */
 
 let driverSelfPos = null;
-let driverOtherPos = null;
+let driverRiders = {};
 
 let wakeLock = null;
 let wakeLockNeeded = false; // true while either screen should be kept awake
@@ -525,7 +538,7 @@ async function startSharing(resumeCode){
 
   driverWatchId = navigator.geolocation.watchPosition(async (pos) => {
     driverSelfPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-    renderTwoPersonMap('driver-map', driverSelfPos, driverOtherPos, 'Customer');
+    renderDriverMap();
     const now = Date.now();
     if(lastDriverUpdateTs && now - lastDriverUpdateTs < 5000) return;
     lastDriverUpdateTs = now;
@@ -545,23 +558,47 @@ async function startSharing(resumeCode){
     document.getElementById('driver-status-text').textContent = 'Location permission needed to share';
   }, { enableHighAccuracy:true, maximumAge:5000, timeout:15000 });
 
-  driverCustomerListenerRef = db.ref('trips/' + currentCode + '/customer');
+  driverRiders = {}; // { riderId: {name, lat, lng, updated} }
+  driverCustomerListenerRef = db.ref('trips/' + currentCode + '/riders');
   driverCustomerListenerRef.on('value', (snap) => {
-    const data = snap.val();
-    if(!data) return;
-    driverOtherPos = { lat: data.lat, lng: data.lng };
-    renderTwoPersonMap('driver-map', driverSelfPos, driverOtherPos, 'Customer');
-    lastDriverSyncTs = data.updated;
-    document.getElementById('driver-customer-updated').textContent = syncLabel(lastDriverSyncTs);
+    driverRiders = snap.val() || {};
+    renderDriverMap();
+
+    const riderIds = Object.keys(driverRiders);
     const statusEl = document.getElementById('driver-customer-status');
-    statusEl.classList.remove('waiting');
-    statusEl.querySelector('span:last-child').textContent = "Customer is sharing their location";
+    if(riderIds.length === 0){
+      statusEl.classList.add('waiting');
+      statusEl.querySelector('span:last-child').textContent = 'Waiting for riders to join and share their location…';
+    } else {
+      statusEl.classList.remove('waiting');
+      statusEl.querySelector('span:last-child').textContent =
+        riderIds.length === 1 ? '1 rider is sharing their location' : `${riderIds.length} riders are sharing their location`;
+    }
+
+    const mostRecent = Math.max(0, ...riderIds.map(id => driverRiders[id].updated || 0));
+    if(mostRecent){
+      lastDriverSyncTs = mostRecent;
+      document.getElementById('driver-customer-updated').textContent = syncLabel(lastDriverSyncTs);
+    }
+
     const now = Date.now();
-    if(now - lastDriverPingTs > PING_MIN_INTERVAL_MS){
+    if(riderIds.length > 0 && now - lastDriverPingTs > PING_MIN_INTERVAL_MS){
       lastDriverPingTs = now;
       playUpdatePing();
     }
   });
+}
+
+function renderDriverMap(){
+  const markerList = [];
+  if(driverSelfPos) markerList.push({ id: 'self', lat: driverSelfPos.lat, lng: driverSelfPos.lng, label: 'You', kind: 'self' });
+  Object.keys(driverRiders || {}).forEach(id => {
+    const r = driverRiders[id];
+    if(r && typeof r.lat === 'number'){
+      markerList.push({ id, lat: r.lat, lng: r.lng, label: r.name || 'Rider', kind: 'rider' });
+    }
+  });
+  if(markerList.length > 0) renderGroupMap('driver-map', markerList);
 }
 
 function stopSharing(){
@@ -583,19 +620,24 @@ function stopSharing(){
   if(mapInstances['driver-map']){
     mapInstances['driver-map'].map.remove();
     delete mapInstances['driver-map'];
-    document.getElementById('driver-map').innerHTML = '<div class="map-placeholder">Waiting for your customer to share their location…</div>';
+    document.getElementById('driver-map').innerHTML = '<div class="map-placeholder">Waiting for riders to share their location…</div>';
   }
   const statusEl = document.getElementById('driver-customer-status');
   statusEl.classList.add('waiting');
-  statusEl.querySelector('span:last-child').textContent = "Waiting for your customer to open the link and share their location…";
+  statusEl.querySelector('span:last-child').textContent = "Waiting for riders to join and share their location…";
   driverSelfPos = null;
-  driverOtherPos = null;
+  driverRiders = {};
   lastDriverSyncTs = null;
   currentCode = null;
   showScreen('home');
 }
 
 /* ---------------- CUSTOMER SIDE ---------------- */
+
+let myRiderId = null;
+let myRiderName = 'Rider';
+let ridersListenerRef = null;
+let otherRidersData = {}; // riders other than myself
 
 async function findDriver(){
   const code = document.getElementById('code-input').value.trim();
@@ -606,6 +648,9 @@ async function findDriver(){
     errBox.classList.remove('hidden');
     return;
   }
+  myRiderName = document.getElementById('rider-name-input').value.trim() || 'Rider';
+  myRiderId = 'r_' + Math.random().toString(36).slice(2, 10);
+
   // Request location permission immediately, before any await, so the
   // permission popup fires while this still counts as a direct response
   // to the button tap (some phone browsers block it otherwise).
@@ -637,6 +682,17 @@ async function findDriver(){
       }
       updateDriverView(d);
     });
+
+    ridersListenerRef = db.ref('trips/' + code + '/riders');
+    ridersListenerRef.on('value', (snap) => {
+      const all = snap.val() || {};
+      otherRidersData = {};
+      Object.keys(all).forEach(id => { if(id !== myRiderId) otherRidersData[id] = all[id]; });
+      renderCustomerMap();
+      const count = Object.keys(otherRidersData).length;
+      document.getElementById('rider-group-count').textContent =
+        count > 0 ? `+ ${count} other rider${count > 1 ? 's' : ''} in your group` : '';
+    });
   }catch(e){
     stopWatching();
     errBox.textContent = 'Something went wrong looking up that code: ' + e.message;
@@ -645,12 +701,25 @@ async function findDriver(){
 }
 
 let customerSelfPos = null;
-let customerOtherPos = null;
+let customerOtherPos = null; // driver's position
+
+function renderCustomerMap(){
+  const markerList = [];
+  if(customerSelfPos) markerList.push({ id: 'self', lat: customerSelfPos.lat, lng: customerSelfPos.lng, label: 'You', kind: 'self' });
+  if(customerOtherPos) markerList.push({ id: 'driver', lat: customerOtherPos.lat, lng: customerOtherPos.lng, label: 'Driver', kind: 'driver' });
+  Object.keys(otherRidersData).forEach(id => {
+    const r = otherRidersData[id];
+    if(r && typeof r.lat === 'number'){
+      markerList.push({ id, lat: r.lat, lng: r.lng, label: r.name || 'Rider', kind: 'rider' });
+    }
+  });
+  if(markerList.length > 0) renderGroupMap('customer-map', markerList);
+}
 
 function updateDriverView(data){
   document.getElementById('customer-vehicle-value').textContent = data.vehicle || 'Your driver';
   customerOtherPos = { lat: data.lat, lng: data.lng };
-  renderTwoPersonMap('customer-map', customerSelfPos, customerOtherPos, data.vehicle || 'Driver');
+  renderCustomerMap();
   lastCustomerSyncTs = data.updated;
   document.getElementById('customer-updated').textContent = syncLabel(lastCustomerSyncTs);
   const now = Date.now();
@@ -668,13 +737,13 @@ function startSharingCustomerLocation(){
   }
   customerWatchId = navigator.geolocation.watchPosition(async (pos) => {
     customerSelfPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-    renderTwoPersonMap('customer-map', customerSelfPos, customerOtherPos, 'Driver');
+    renderCustomerMap();
     const now = Date.now();
     if(lastCustomerUpdateTs && now - lastCustomerUpdateTs < 5000) return;
     lastCustomerUpdateTs = now;
-    const payload = { lat: pos.coords.latitude, lng: pos.coords.longitude, updated: now };
+    const payload = { name: myRiderName, lat: pos.coords.latitude, lng: pos.coords.longitude, updated: now };
     try{
-      await db.ref('trips/' + currentCode + '/customer').set(payload);
+      await db.ref('trips/' + currentCode + '/riders/' + myRiderId).set(payload);
       statusEl.classList.remove('waiting');
       statusEl.querySelector('span:last-child').textContent = 'Sharing your location with your driver';
     }catch(e){
@@ -689,13 +758,19 @@ function stopWatching(){
   releaseWakeLock();
   document.body.style.overflow = '';
   if(customerDriverListenerRef){ customerDriverListenerRef.off(); customerDriverListenerRef = null; }
+  if(ridersListenerRef){ ridersListenerRef.off(); ridersListenerRef = null; }
   if(customerWatchId !== null){ navigator.geolocation.clearWatch(customerWatchId); customerWatchId = null; }
+  if(currentCode && myRiderId && db){ db.ref('trips/' + currentCode + '/riders/' + myRiderId).remove().catch(() => {}); }
   if(mapInstances['customer-map']){
     mapInstances['customer-map'].map.remove();
     delete mapInstances['customer-map'];
   }
+  const countEl = document.getElementById('rider-group-count');
+  if(countEl) countEl.textContent = '';
   customerSelfPos = null;
   customerOtherPos = null;
+  otherRidersData = {};
+  myRiderId = null;
   lastCustomerSyncTs = null;
   currentCode = null;
 }
