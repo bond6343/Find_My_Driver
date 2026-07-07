@@ -152,10 +152,10 @@
     <!-- CUSTOMER SETUP -->
     <div id="screen-customer-setup" class="hidden">
       <p class="role-desc">Enter the 4-digit code your driver sent you. If others in your group also join with this code, you'll all see each other.</p>
-      <label for="code-input">Driver's code</label>
-      <input type="tel" id="code-input" class="code-input code-font" maxlength="4" inputmode="numeric" placeholder="1234" />
       <label for="rider-name-input">Your name (optional — helps the driver and your group tell you apart)</label>
       <input type="text" id="rider-name-input" placeholder="e.g. Sarah" maxlength="20" />
+      <label for="code-input">Driver's code</label>
+      <input type="tel" id="code-input" class="code-input code-font" maxlength="4" inputmode="numeric" placeholder="1234" />
       <button class="big-btn btn-amber" style="margin-top:20px;" onclick="findDriver()">Find My Driver</button>
       <button class="back-link" onclick="showScreen('home')">Back</button>
       <div id="customer-error" class="error-box hidden"></div>
